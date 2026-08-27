@@ -6,6 +6,7 @@ Vendored from comfy-kitchen (Apache-2.0). Selection order for NATTEN-kind recipe
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -149,7 +150,16 @@ class XpuNaAttention:
 
 
 def xpu_na_available() -> bool:
-    """True when the xpu_ltx_kernels SYCL NA library is loadable and usable."""
+    """True when the xpu_ltx_kernels SYCL NA library is usable AND opted in.
+
+    The SYCL kernel is NOT auto-selected: measured end-to-end on the DiffVAE
+    decoder's wide kernels ((3,7,7), (3,5,5), (11,11,11)) the eager tiled-SDPA
+    fallback is faster (dense batched SDPA beats a per-query flash kernel
+    without XMX/DPAS). Enable explicitly with the env var
+    ``LTX_XPU_NA_KERNELS=1``.
+    """
+    if os.environ.get("LTX_XPU_NA_KERNELS") != "1":
+        return False
     if not torch.xpu.is_available():
         return False
     try:
@@ -167,10 +177,14 @@ def warn_no_natten(*, backend: str) -> None:
 
 
 def fallback_na_attention() -> NAAttentionCallable:
-    """Pick the best available fallback: XPU SYCL, else Triton, else eager.
+    """Pick the best available fallback: Triton, else eager.
 
     Selection order::
-        natten → (loud warning) xpu_ltx_kernels (XPU) → Triton (CUDA) → eager
+        natten → (loud warning) Triton (CUDA) → eager tiled SDPA
+
+    On XPU, ``xpu_ltx_kernels`` SYCL is only used when opted in via
+    ``LTX_XPU_NA_KERNELS=1`` (see :func:`xpu_na_available`); otherwise eager
+    tiled SDPA, which benchmarks faster on the real decoder kernels.
     """
     if xpu_na_available():
         warn_no_natten(backend="xpu_ltx_kernels SYCL na3d")

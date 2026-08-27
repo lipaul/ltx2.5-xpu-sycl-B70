@@ -80,9 +80,11 @@ There is **no `.pre-commit-config.yaml`** in this tree — `pre-commit run` is n
   `packages/ltx-core/src/ltx_core/devices.py` (XPU is probed via `torch.xpu.is_available()`).
 - LTX 2.5 requires the LTX-fine-tuned Gemma 4 text encoder; Google's vanilla Gemma 4 is not a substitute.
 - **DiffVAE neighborhood attention runs the eager tiled-SDPA fallback by default on XPU** (natten is CUDA-only,
-  `triton_na_available()` is gated on `torch.cuda`). `packages/xpu-ltx-kernels` provides a SYCL `na3d` kernel
-  (2–8x vs eager for the raw op); `fallback_na_attention()` in `fallback_na/__init__.py` picks it when the
-  library is built and importable. It is an opt-in extra: `uv sync` does not build it.
+  `triton_na_available()` is gated on `torch.cuda`). `packages/xpu-ltx-kernels` provides a SYCL `na3d` kernel,
+  but it is **opt-in** (`LTX_XPU_NA_KERNELS=1`): at the decoder's real wide kernels `(3,7,7)/(3,5,5)/(11,11,11)`
+  eager's dense batched SDPA is ~2.8x faster end-to-end than the per-query flash kernel (no XMX/DPAS; ESIMD is
+  driver-blocked). The SYCL kernel wins only for small cubic kernels the decoder doesn't use. Keep eager as the
+  default.
 - **XPU allocator cache is never freed by the upstream memory helpers.** `cleanup_accelerator_memory` /
   `empty_device_cache` / `synchronize_device` in `devices.py` were CUDA/MPS-only, so the ~29 GB XPU
   caching-allocator cache from the text encoder stayed reserved and the DiffVAE tiling check reported

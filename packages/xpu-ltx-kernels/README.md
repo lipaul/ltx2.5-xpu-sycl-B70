@@ -43,10 +43,11 @@ after adding/removing `csrc/*.cpp` — the source list is a configure-time GLOB.
 
 ## Integration
 
-`ltx-core`'s DiffVAE NA fallback picks up the kernel automatically via
-`xpu_ltx_kernels.available()` (see `fallback_na/__init__.py`):
-natten → `xpu_ltx_kernels` (XPU) → Triton (CUDA) → eager tiled SDPA. No manual
-wiring needed; the loud no-natten banner logs `xpu_ltx_kernels SYCL na3d`.
+`ltx-core`'s DiffVAE NA fallback chain is
+natten → Triton (CUDA) → eager tiled SDPA. The SYCL kernel is **opt-in** on XPU:
+set `LTX_XPU_NA_KERNELS=1` to select it via `fallback_na_attention()`. It is not
+the default because end-to-end it is *slower* than eager on the real decoder
+kernels (see Benchmark).
 
 ## Kernel contract
 
@@ -57,20 +58,32 @@ pre-scaled upstream). fp32 accumulate, flash-style online softmax, bf16 output.
 Semantics match `ltx_core...fallback_na.eager.na3d`; see
 `tests/test_na3d_parity.py`.
 
-## ESIMD note
-
-An ESIMD port was attempted (`esimd::simd` register tiles, `sycl_explicit_simd`
-kernels, `-fsycl-esimd-force-stateless-mem`). The device-code JIT on this
-Intel Graphics driver rejects ESIMD-generated SPIR-V with
-`Build program log ... invalid api option` even for a trivial `simd<float,16>`
-copy kernel, so the production path is plain SYCL (the compiler auto-vectorizes
-the bf16 loads). AOT (`-fsycl-targets=spir64_gen --device bmg`) fails the
-ESIMD kernel build (`gen compiler command failed`). Revisit with a newer
-oneAPI/driver.
-
-## Benchmark
+## Benchmark (measured, end-to-end)
 
 `bench/bench_na3d.py` compares the raw op vs the eager tiled-SDPA fallback on
-XPU (2–8x faster, larger tiles win more). `bench/bench_diffvae_block.py`
-compares a full `NeighborhoodAttention3D.forward` (RoPE + QKV + proj included):
-~1.2x at tile sizes 16×16, where the NA is not the sole cost.
+XPU for cubic `(3,3,3)` kernels — SYCL is 2–8x faster there because eager's
+mask materialization dominates small kernels.
+
+But the **real DiffVAE decoder uses wide kernels**: `stage_kernels =
+[[3,7,7],[3,7,7],[3,5,5],[3,5,5],[11,11,11]]`. At those, eager's dense batched
+SDPA (one big masked GEMM per window-geometry group) is faster than a per-query
+flash kernel that can't use XMX/DPAS (ESIMD is blocked by the driver). Measured
+at decode-tile shapes:
+
+| shape              | kernel      | sycl / eager |
+|--------------------|-------------|--------------|
+| (1,9,16,16,32,64)  | (3,7,7)     | 0.4x         |
+| (1,9,16,16,32,64)  | (3,5,5)     | 1.0x         |
+| (1,9,32,32,32,64)  | (3,7,7)     | 0.9x         |
+| (1,9,16,32,32,64)  | (3,7,7)     | 1.2x         |
+| (1,11,32,32,32,64) | (11,11,11)  | 0.2x         |
+
+End-to-end (512×512/49f, distilled, `--offload cpu`): **eager decode 6.4s vs
+SYCL 17.9s** (~2.8x slower). So the SYCL kernel is a correctness parity port,
+not a speedup, for the shipped decoder — keep eager as the XPU default. A
+real win would need XMX/DPAS (blocked) or a batched-GEMM-shaped kernel, not
+per-query flash.
+
+`bench/bench_diffvae_block.py` compares a full `NeighborhoodAttention3D.forward`
+(RoPE + QKV + proj included) at cubic kernels: ~1.2x, where the NA is not the
+sole cost.

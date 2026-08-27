@@ -7,11 +7,14 @@ does not repeat the same investigation. The companion living docs are
 `packages/xpu-ltx-kernels/README.md` (build/usage) and `AGENTS.md` (toolchain
 rules).
 
-Final result: a plain-SYCL `na3d` (3D neighborhood attention) kernel that
-replaces the eager tiled-SDPA fallback in DiffVAE decode, **2–8× faster for the
-raw op** (up to 5× at typical 16×16 decode tiles, 8.4× for HD=32), ~1.2× for a
-full `NeighborhoodAttention3D.forward` where RoPE/linear dominate. Committed as
-`b316844`.
+Final result: a plain-SYCL `na3d` (3D neighborhood attention) kernel with full
+correctness parity vs the eager fallback (12 test cases pass), but **not a
+performance win for the real workload**. The DiffVAE decoder's wide kernels
+`(3,7,7)/(3,5,5)/(11,11,11)` are handled better by eager's dense batched SDPA
+than by a per-query flash kernel without XMX/DPAS (ESIMD is driver-blocked).
+Measured end-to-end (512×512/49f, `--offload cpu`): eager decode **6.4s** vs
+SYCL **17.9s** (~2.8x slower). The kernel is therefore **opt-in**
+(`LTX_XPU_NA_KERNELS=1`), not the XPU default. Committed as `b316844`.
 
 ---
 
@@ -42,8 +45,11 @@ On XPU this is broken: `natten` is CUDA-only (dropped from this fork), and
 `triton_na_available()` in `fallback_na/__init__.py` is gated on
 `torch.cuda.is_available()`. So **every default inference run pays the pure
 PyTorch eager tiled-SDPA fallback** (`fallback_na/eager.py` — stack/permute +
-full additive-mask materialization). That is a clean, self-contained porting
-target with a reference implementation already in-tree for correctness testing.
+full additive-mask materialization). That made it an attractive porting target
+with a reference implementation in-tree for correctness testing. **Caveat that
+only emerged from the end-to-end run:** the decoder's *wide* kernels make eager's
+dense batched SDPA faster than a per-query flash kernel on this GPU, so the port
+ended up as parity, not a speedup (see §6).
 
 ## 2. Kernel contract (fixed)
 
@@ -184,25 +190,43 @@ Experiments that did **not** win and were reverted:
 - `tests/test_na3d_parity.py`: 12 cases (HD 32/64, B 1–2, odd W, non-cubic
   kernels, border dims == kernel) vs `eager.na3d` on CPU. `max_abs_diff` 0.0156
   (bf16 rounding), all `allclose(rtol=2e-2, atol=2e-2)`, **ALL OK**.
-- `bench/bench_na3d.py` (raw op, XPU, eager vs SYCL) — representative numbers:
+- **Microbenchmark (misleading for the real workload):** at cubic `(3,3,3)`
+  kernels the raw op is 2–8x faster than eager (eager's mask materialization
+  dominates small kernels). This is why the naive "2–8x" claim was wrong to
+  extrapolate.
+- **Real decoder kernels (from VAE config `stage_kernels =
+  [[3,7,7],[3,7,7],[3,5,5],[3,5,5],[11,11,11]]`):** eager's dense batched SDPA
+  (one masked GEMM per window-geometry group) beats the per-query flash kernel:
 
-  | shape (T,H,W,NH,HD)        | eager  | sycl   | speedup |
-  |----------------------------|--------|--------|---------|
-  | (4,16,16,16,64)            | ~0.4ms | ~0.12ms| ~3×     |
-  | (4,32,32,16,64)            | ~2.1ms | ~0.42ms| ~5×     |
-  | (4,16,16,16,32)            | ~0.38ms| ~0.046ms| ~8.4×  |
+  | shape              | kernel      | sycl / eager |
+  |--------------------|-------------|--------------|
+  | (1,9,16,16,32,64)  | (3,7,7)     | 0.4x         |
+  | (1,9,16,16,32,64)  | (3,5,5)     | 1.0x         |
+  | (1,9,32,32,32,64)  | (3,7,7)     | 0.9x         |
+  | (1,9,16,32,32,64)  | (3,7,7)     | 1.2x         |
+  | (1,11,32,32,32,64) | (11,11,11)  | 0.2x         |
 
-- `bench/bench_diffvae_block.py`: full `NeighborhoodAttention3D.forward` (RoPE
-  + QKV + proj included) ~1.2× — linear/RoPE dominate at 16×16 tiles, so the
-  raw-op win shrinks; expect more at larger decode tiles.
+- **End-to-end (512×512/49f, distilled, `--offload cpu`, decode stage timed):**
+  eager **6.4s** vs SYCL **17.9s** (~2.8x slower). Note: the pipeline needs
+  `@torch.inference_mode()` (as the real CLI `main()` has) or the text-encoder
+  cache isn't freed and the DiffVAE tiling check fails with `usable_bytes=0`.
+- **Conclusion:** the SYCL kernel is a correctness-parity port, not a speedup,
+  for the shipped decoder. A real win needs XMX/DPAS (blocked) or a
+  batched-GEMM-shaped kernel. Kept **opt-in** via `LTX_XPU_NA_KERNELS=1`; eager
+  remains the XPU default.
 - `uv run ruff check` clean on all changed files.
 
 ## 7. End-to-end run status
 
-Full pipeline A/B (`run_pipeline.sh`) was **not** run: no model weights on this
-machine (`/home/acm/paul/models/ltx-2.5` absent; weights are gitignored and need
-`hf auth login` + `hf download` for the gated `Lightricks/LTX-2.5` repo). The
-op-level and block-level benchmarks above are the quantitative evidence.
+Models were present at `/home/acm/work/models/ltx-2.5` (split layout). Full
+pipeline A/B ran at 512×512/49f with `--offload cpu` (required for the 22B
+model on the 30 GB XPU). Decode-stage timing (wrapping `VideoDecoder.__call__`):
+**eager 6.42s vs SYCL 17.85s**. Two run-harness gotchas learned:
+- The pipeline must run under `@torch.inference_mode()` (the real CLI `main()`
+  is so decorated); a bare `pipeline(...)` call leaves the text-encoder cache
+  resident, and the DiffVAE tiling check then reports `usable_bytes=0`
+  (`Cannot fit a DiffVAE decode tile`).
+- Use `--offload cpu`; without it the 40 GB transformer won't fit the 30 GB GPU.
 
 ## 8. Git state
 
