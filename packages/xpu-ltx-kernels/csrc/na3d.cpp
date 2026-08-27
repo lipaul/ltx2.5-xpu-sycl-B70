@@ -253,7 +253,14 @@ at::Tensor na3d(
 
 }  // namespace xpu_ltx_kernels::na3d
 
+namespace xpu_ltx_kernels::na3d_esimd {
+at::Tensor na3d_esimd(const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                      int64_t, int64_t, int64_t);
+}  // namespace xpu_ltx_kernels::na3d_esimd
+
 TORCH_LIBRARY(xpu_ltx_kernels, m) {
   m.def("na3d(Tensor q, Tensor k, Tensor v, int kt, int kh, int kw) -> Tensor",
         &xpu_ltx_kernels::na3d::na3d);
+  m.def("na3d_esimd(Tensor q, Tensor k, Tensor v, int kt, int kh, int kw) -> Tensor",
+        &xpu_ltx_kernels::na3d_esimd::na3d_esimd);
 }

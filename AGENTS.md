@@ -40,22 +40,24 @@ against the official PyTorch **XPU** index — no CUDA.
 
 - Use `uv` everywhere: `uv sync`, `uv run`. Do not use bare `pip` or a system python.
 - torch/torchaudio are pinned to the **XPU** index in `packages/ltx-core/pyproject.toml`:
-  `torch==2.12.0+xpu`, `torchaudio==2.11.0+xpu`, plus `triton-xpu==3.7.1` (declared as a *direct* dep — uv only
-  applies `[tool.uv.sources]` index mappings to direct deps, so the transitive `triton-xpu` would otherwise
-  resolve from PyPI at a conflicting version).
+  `torch==2.13.0+xpu`, `torchaudio==2.11.0+xpu`, `torchvision==0.28.0+xpu`, plus `triton-xpu==3.7.2` (declared as a
+  *direct* dep — uv only applies `[tool.uv.sources]` index mappings to direct deps, so the transitive
+  `triton-xpu` would otherwise resolve from PyPI at a conflicting version).
 - **`transformers` is capped at `<5.15`** (in `ltx-core` deps). 5.15.0+ breaks the Gemma 4 text encoder build.
-- `ltx-core` bounds `requires-python = ">=3.10,<3.14"`: `triton-xpu==3.7.1` has no free-threaded 3.14
+- `ltx-core` bounds `requires-python = ">=3.10,<3.14"`: `triton-xpu==3.7.2` has no free-threaded 3.14
   (cp314t) Windows wheel, so an unbounded range makes the universal lock unresolvable.
 - **`ltx-trainer` and `ltx-kernels` are excluded from the uv workspace** (`[tool.uv.workspace].exclude`). The
   trainer pins CUDA-only `torchcodec`; the kernels are CUDA extensions. A plain `uv sync` installs only
   `ltx-core` + `ltx-pipelines`, the pipeline stack.
 - **The `natten` extra is gone** (the README Quick Start still runs `uv sync --extra natten`) — it was dropped
   when the CUDA-only `natten` package was removed; plain `uv sync` is the correct install command on this fork.
-- **SYCL toolchain must match torch-xpu's runtime.** torch 2.12.0+xpu links `libsycl.so.8` (oneAPI 2025.3). The
-  newer installed 2026.x compilers ship `libsycl.so.9`, whose device-image format is incompatible — a v9-built
-  extension crashes in `ProgramManager::addImage` at `torch.ops.load_library`. Use
-  `intel-oneapi-compiler-dpcpp-cpp-2025.3` (apt) for `xpu-ltx-kernels`; CMake auto-selects it. ESIMD device code
-  is additionally rejected by the current driver (`invalid api option`), so plain SYCL is the working path.
+- **SYCL toolchain must match torch-xpu's runtime.** torch **2.13.0+xpu** links `libsycl.so.9` (oneAPI 2026.0).
+  Build `xpu-ltx-kernels` with the oneAPI **2026.1** compiler (`intel-oneapi-compiler-dpcpp-cpp-2026.1`, apt);
+  CMake auto-selects it. Do NOT downgrade to 2025.3/libsycl.so.8: torch 2.12.0+xpu (libsycl.so.8) is the pairing
+  whose ESIMD device code the current driver rejects with `invalid api option` (the 2025.3 runtime emits a
+  malformed `-vc-codegen` option token; verified via `IGC_ShaderDumpEnable` — the VC options string is
+  `\x32\x35 -vc-codegen` vs 2026.1's clean `-vc-codegen -disable-finalizer-msg`). With 2026.1, **ESIMD works**
+  end-to-end in the torch process (`na3d_esimd` op).
 
 ## Code quality gates
 
@@ -80,10 +82,11 @@ There is **no `.pre-commit-config.yaml`** in this tree — `pre-commit run` is n
   `packages/ltx-core/src/ltx_core/devices.py` (XPU is probed via `torch.xpu.is_available()`).
 - LTX 2.5 requires the LTX-fine-tuned Gemma 4 text encoder; Google's vanilla Gemma 4 is not a substitute.
 - **DiffVAE neighborhood attention runs the eager tiled-SDPA fallback by default on XPU** (natten is CUDA-only,
-  `triton_na_available()` is gated on `torch.cuda`). `packages/xpu-ltx-kernels` provides a SYCL `na3d` kernel,
-  but it is **opt-in** (`LTX_XPU_NA_KERNELS=1`): at the decoder's real wide kernels `(3,7,7)/(3,5,5)/(11,11,11)`
-  eager's dense batched SDPA is ~2.8x faster end-to-end than the per-query flash kernel (no XMX/DPAS; ESIMD is
-  driver-blocked). The SYCL kernel wins only for small cubic kernels the decoder doesn't use. Keep eager as the
+  `triton_na_available()` is gated on `torch.cuda`). `packages/xpu-ltx-kernels` provides a SYCL `na3d` kernel
+  (plus an ESIMD `na3d_esimd` that works since the torch 2.13 / oneAPI 2026.1 upgrade), but both are **opt-in**
+  (`LTX_XPU_NA_KERNELS=1`): at the decoder's real wide kernels `(3,7,7)/(3,5,5)/(11,11,11)` eager's dense batched
+  SDPA is ~2.5x faster end-to-end than the per-query kernels (measured decode 7.0s eager vs 17.3s SYCL at
+  512x512/49f). A real win would need a batched-GEMM-shaped (DPAS) kernel, not per-query flash. Keep eager as the
   default.
 - **XPU allocator cache is never freed by the upstream memory helpers.** `cleanup_accelerator_memory` /
   `empty_device_cache` / `synchronize_device` in `devices.py` were CUDA/MPS-only, so the ~29 GB XPU

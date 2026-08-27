@@ -1,11 +1,14 @@
 # xpu-ltx-kernels
 
-SYCL kernels for `ltx-core` on Intel XPU (B70). Currently ships one fused kernel:
+SYCL kernels for `ltx-core` on Intel XPU (B70). Currently ships:
 
 - **`na3d`** — 3D neighborhood attention for the DiffVAE decoder, the SYCL port
   of `ltx_kernels`' Blackwell-only `na_attn_dsl`. On XPU the decoder otherwise
-  runs the slow pure-PyTorch eager tiled-SDPA fallback (natten is CUDA-only and
-  the Triton fallback is gated on `torch.cuda.is_available()`).
+  runs the pure-PyTorch eager tiled-SDPA fallback (natten is CUDA-only and the
+  Triton fallback is gated on `torch.cuda.is_available()`).
+- **`na3d_esimd`** — same kernel written with Intel Explicit SIMD (ESIMD).
+  Requires the oneAPI 2026.x toolchain / torch 2.13.0+xpu (libsycl.so.9); with
+  the older 2025.3 pairing the ESIMD device code was driver-rejected.
 
 This package is excluded from the uv workspace (like `ltx-kernels`). Build the
 native library with CMake, then install the Python wrapper.
@@ -14,16 +17,17 @@ native library with CMake, then install the Python wrapper.
 
 Prerequisites:
 
-- the **oneAPI 2025.3** compiler (`intel-oneapi-compiler-dpcpp-cpp-2025.3` via
-  the Intel apt repo). This is a hard requirement: torch 2.12.0+xpu links
-  `libsycl.so.8` (2025.3), and the newer 2026.x compilers ship `libsycl.so.9`
-  whose device-image format is incompatible (crashes in
-  `ProgramManager::addImage` at dlopen). CMake picks 2025.3 automatically when
+- the **oneAPI 2026.1** compiler (`intel-oneapi-compiler-dpcpp-cpp-2026.1` via
+  the Intel apt repo). This must match torch-xpu's SYCL runtime: torch
+  2.13.0+xpu links `libsycl.so.9` (oneAPI 2026.0), and the 2026.1 compiler's
+  device code is accepted by the driver. Do NOT use the 2025.3 toolchain
+  (libsycl.so.8): its ESIMD device code is rejected with `invalid api option`
+  (malformed `-vc-codegen` option token). CMake picks 2026.1 automatically when
   present; verify with:
   ```bash
-  apt-cache policy intel-oneapi-compiler-dpcpp-cpp-2025.3   # installable?
-  sudo apt-get install -y intel-oneapi-compiler-dpcpp-cpp-2025.3
-  /opt/intel/oneapi/compiler/2025.3/bin/icpx --version
+  apt-cache policy intel-oneapi-compiler-dpcpp-cpp-2026.1   # installable?
+  sudo apt-get install -y intel-oneapi-compiler-dpcpp-cpp-2026.1
+  /opt/intel/oneapi/compiler/2026.1/bin/icpx --version
   ```
 - the project venv with torch-xpu (`uv sync` at the repo root).
 
@@ -67,22 +71,23 @@ mask materialization dominates small kernels.
 But the **real DiffVAE decoder uses wide kernels**: `stage_kernels =
 [[3,7,7],[3,7,7],[3,5,5],[3,5,5],[11,11,11]]`. At those, eager's dense batched
 SDPA (one big masked GEMM per window-geometry group) is faster than a per-query
-flash kernel that can't use XMX/DPAS (ESIMD is blocked by the driver). Measured
-at decode-tile shapes:
+flash kernel. Measured on torch 2.13 at decode-tile shapes:
 
-| shape              | kernel      | sycl / eager |
-|--------------------|-------------|--------------|
-| (1,9,16,16,32,64)  | (3,7,7)     | 0.4x         |
-| (1,9,16,16,32,64)  | (3,5,5)     | 1.0x         |
-| (1,9,32,32,32,64)  | (3,7,7)     | 0.9x         |
-| (1,9,16,32,32,64)  | (3,7,7)     | 1.2x         |
-| (1,11,32,32,32,64) | (11,11,11)  | 0.2x         |
+| shape              | kernel      | sycl / eager | esimd / eager |
+|--------------------|-------------|--------------|---------------|
+| (1,9,16,16,32,64)  | (3,7,7)     | 0.5x         | 0.1x          |
+| (1,9,16,16,32,64)  | (3,5,5)     | 1.0x         | 0.2x          |
+| (1,9,32,32,32,64)  | (3,7,7)     | 0.7x         | 0.2x          |
+| (1,9,16,32,32,64)  | (3,7,7)     | 1.0x         | 0.2x          |
+| (1,11,16,16,32,64) | (11,11,11)  | 0.1x         | 0.02x         |
 
-End-to-end (512×512/49f, distilled, `--offload cpu`): **eager decode 6.4s vs
-SYCL 17.9s** (~2.8x slower). So the SYCL kernel is a correctness parity port,
-not a speedup, for the shipped decoder — keep eager as the XPU default. A
-real win would need XMX/DPAS (blocked) or a batched-GEMM-shaped kernel, not
-per-query flash.
+End-to-end (512×512/49f, distilled, `--offload cpu`): **eager decode 7.0s vs
+SYCL 17.3s** (~2.5x slower). So the per-query kernels are correctness-parity
+ports, not speedups, for the shipped decoder — keep eager as the XPU default.
+A real win would need a batched-GEMM-shaped (DPAS/XMX) kernel that matches
+eager's dense-GEMM structure; per-query flash (plain SYCL or ESIMD) cannot beat
+it. `na3d_esimd` is kept as proof that ESIMD runs on this stack since the
+torch 2.13 / oneAPI 2026.1 upgrade.
 
 `bench/bench_diffvae_block.py` compares a full `NeighborhoodAttention3D.forward`
 (RoPE + QKV + proj included) at cubic kernels: ~1.2x, where the NA is not the

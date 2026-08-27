@@ -35,16 +35,21 @@ execute_process(
 set(TORCH_INCLUDE_DIR "${TORCH_ROOT}/include")
 set(TORCH_LIB_DIR "${TORCH_ROOT}/lib")
 
-# SYCL/ESIMD toolchain MUST match torch-xpu's SYCL runtime. torch 2.12.0+xpu
-# links libsycl.so.8 (oneAPI 2025.3); the newer standalone compilers (2026.x)
-# ship libsycl.so.9 whose device-image format is incompatible (crashes in
-# ProgramManager::addImage at dlopen). Use the 2025.3 icpx + its headers + its
-# libsycl.so.8, all self-consistent. Installable via:
-#   sudo apt-get install -y intel-oneapi-compiler-dpcpp-cpp-2025.3
-if(EXISTS "/opt/intel/oneapi/compiler/2025.3/bin/icpx")
-  set(_SYCL_COMPILER "/opt/intel/oneapi/compiler/2025.3/bin/icpx")
-  set(SYCL_INCLUDE_DIR "/opt/intel/oneapi/compiler/2025.3/include")
-  set(SYCL_LIB_DIR "/opt/intel/oneapi/compiler/2025.3/lib")
+# SYCL/ESIMD toolchain MUST match torch-xpu's SYCL runtime. torch 2.13.0+xpu
+# links libsycl.so.9 (oneAPI 2026.0); use the 2026.x icpx + its headers + its
+# libsycl.so.9, all self-consistent. (torch 2.12.0+xpu linked libsycl.so.8 /
+# 2025.3, whose ESIMD device code the current driver rejects with
+# "invalid api option"; 2026.1 ESIMD is accepted.) Prefer 2026.1, the newest
+# installed 2026.x. Installable via:
+#   sudo apt-get install -y intel-oneapi-compiler-dpcpp-cpp-2026.1
+if(EXISTS "/opt/intel/oneapi/compiler/2026.1/bin/icpx")
+  set(_SYCL_COMPILER "/opt/intel/oneapi/compiler/2026.1/bin/icpx")
+  set(SYCL_INCLUDE_DIR "/opt/intel/oneapi/compiler/2026.1/include")
+  set(SYCL_LIB_DIR "/opt/intel/oneapi/compiler/2026.1/lib")
+elseif(EXISTS "/opt/intel/oneapi/compiler/2026.0/bin/icpx")
+  set(_SYCL_COMPILER "/opt/intel/oneapi/compiler/2026.0/bin/icpx")
+  set(SYCL_INCLUDE_DIR "/opt/intel/oneapi/compiler/2026.0/include")
+  set(SYCL_LIB_DIR "/opt/intel/oneapi/compiler/2026.0/lib")
 else()
   set(_SYCL_COMPILER "icpx")
   set(SYCL_INCLUDE_DIR "/opt/intel/oneapi/compiler/latest/include")

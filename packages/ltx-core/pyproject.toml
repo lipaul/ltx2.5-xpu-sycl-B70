@@ -3,19 +3,21 @@ name = "ltx-core"
 version = "1.2.0"
 description = "Core implementation of Lightricks' LTX-2 model"
 readme = "README.md"
-# XPU torch pins triton-xpu==3.7.1, which has no free-threaded 3.14 (cp314t)
+# XPU torch pins triton-xpu==3.7.2, which has no free-threaded 3.14 (cp314t)
 # Windows wheel; bounding the supported range keeps the universal lock resolvable.
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "torch==2.12.0+xpu",
+    # torch 2.13.0+xpu links libsycl.so.9 (oneAPI 2026.0), which the current
+    # Intel Graphics driver accepts for ESIMD device code -- torch 2.12.0+xpu
+    # (libsycl.so.8, oneAPI 2025.3) is rejected with "invalid api option".
+    "torch==2.13.0+xpu",
     "torchaudio==2.11.0+xpu",
     # Required transitively by transformers' Gemma 4 image processor, but absent
-    # from the lockfile. 0.27.1 pulls torch 2.12.1 (conflicts with the pin), so
-    # stay on 0.27.0 from the XPU index.
-    "torchvision==0.27.0+xpu",
-    # torch 2.12.0+xpu pins triton-xpu==3.7.1; it is also published on PyPI at a
+    # from the lockfile. 0.28.0 is the ABI-matched build for torch 2.13.0.
+    "torchvision==0.28.0+xpu",
+    # torch 2.13.0+xpu pins triton-xpu==3.7.2; it is also published on PyPI at a
     # conflicting version, so declare it here (direct dep) to force the XPU index.
-    "triton-xpu==3.7.1; sys_platform == 'linux'",
+    "triton-xpu==3.7.2; sys_platform == 'linux'",
     "einops",
     "numpy",
     "av",

@@ -7,14 +7,22 @@ does not repeat the same investigation. The companion living docs are
 `packages/xpu-ltx-kernels/README.md` (build/usage) and `AGENTS.md` (toolchain
 rules).
 
-Final result: a plain-SYCL `na3d` (3D neighborhood attention) kernel with full
-correctness parity vs the eager fallback (12 test cases pass), but **not a
-performance win for the real workload**. The DiffVAE decoder's wide kernels
-`(3,7,7)/(3,5,5)/(11,11,11)` are handled better by eager's dense batched SDPA
-than by a per-query flash kernel without XMX/DPAS (ESIMD is driver-blocked).
-Measured end-to-end (512×512/49f, `--offload cpu`): eager decode **6.4s** vs
-SYCL **17.9s** (~2.8x slower). The kernel is therefore **opt-in**
-(`LTX_XPU_NA_KERNELS=1`), not the XPU default. Committed as `b316844`.
+Final result: plain-SYCL `na3d` and ESIMD `na3d_esimd` (3D neighborhood
+attention) kernels with full correctness parity vs the eager fallback (12 test
+cases pass), but **not a performance win for the real workload**. The DiffVAE
+decoder's wide kernels `(3,7,7)/(3,5,5)/(11,11,11)` are handled better by
+eager's dense batched SDPA than by per-query flash kernels. Measured end-to-end
+(512×512/49f, `--offload cpu`): eager decode **7.0s** vs SYCL **17.3s** (~2.5x
+slower). The kernels are therefore **opt-in** (`LTX_XPU_NA_KERNELS=1`), not the
+XPU default.
+
+**Key outcome of the follow-up investigation:** the earlier claim that "ESIMD
+is driver-blocked" was wrong in its conclusion. The blocker was a **oneAPI
+version mismatch**: torch 2.12.0+xpu pinned `libsycl.so.8` (2025.3), and the
+2025.3 runtime emitted a malformed `-vc-codegen` option token that the driver's
+IGC rejected (`invalid api option`). Upgrading to **torch 2.13.0+xpu**
+(`libsycl.so.9`, oneAPI 2026.0) and building with the oneAPI 2026.1 compiler
+makes ESIMD work end-to-end in the torch process. See §3.6.
 
 ---
 
@@ -99,7 +107,7 @@ Consequences of building with a v9 compiler:
 PATH — with 2025.3 first that also works, but CMake gives us `TORCH_LIBRARY`
 control, so we use CMake.
 
-### 3.2 ESIMD is rejected by the current driver
+### 3.2 ESIMD is rejected by the current driver (resolved in §3.6)
 
 The user explicitly asked for ESIMD/SYCL. We wrote a proper ESIMD kernel
 (`esimd::simd` register tiles, `__attribute__((sycl_explicit_simd))`,
@@ -111,11 +119,11 @@ Build program log for 'Intel(R) Graphics [0xe223]': invalid api option: ...
 ```
 
 AOT (`-fsycl-targets=spir64_gen --device bmg` / `-Xs "-device bmg"`) fails with
-`gen compiler command failed` / "No kernel named ... found". **The driver rejects
-ESIMD-generated SPIR-V on this stack.** Verdict: plain SYCL is the working path;
-the compiler auto-vectorizes bf16 loads. Documented in README + AGENTS.md; the
-ESIMD source was removed from the build. Revisit only with a newer
-oneAPI/driver.
+`gen compiler command failed` / "No kernel named ... found". **Initial verdict:
+the driver rejects ESIMD-generated SPIR-V on this stack**, so plain SYCL was
+used. **This conclusion was later corrected** — see §3.6: the real cause was a
+oneAPI 2025.3 runtime bug (malformed `-vc-codegen` option), fixed by upgrading
+to torch 2.13.0+xpu / oneAPI 2026.1.
 
 ### 3.3 bf16 device conversions crash on this stack
 
@@ -145,6 +153,44 @@ the stack and matched all parity tests.
   — the source list is a configure-time `file(GLOB ...)`.
 - The bash tool's persistent cwd broke several `cd build && cmake` invocations;
   always pass an explicit workdir.
+
+### 3.6 ESIMD root cause: it was a oneAPI 2025.3 bug, not the driver
+
+Follow-up investigation ("is the problem in oneAPI, torch-xpu, or a version
+incompatibility?") answered: **a oneAPI version mismatch**. Determinative
+evidence, all reproduced standalone (no torch):
+
+| build toolchain                       | ESIMD result                  |
+|---------------------------------------|-------------------------------|
+| oneAPI 2025.3 icpx + libsycl.so.8     | `invalid api option` (fails)  |
+| oneAPI 2026.1 icpx + libsycl.so.9     | **works** (`h0=1.0` correct)  |
+| 2025.3 plain SYCL (non-ESIMD)         | works (control)               |
+| 2025.3 ESIMD over OpenCL and Level-Zero | same failure (same IGC)      |
+
+So the driver, the GPU (B70, `05:00.0 Battlemage G31`) and the IGC version all
+accept ESIMD — only the 2025.3 toolchain produces a bad program. `IGC_ShaderDumpEnable`
+captured the exact IGC build options:
+
+```
+2025.3:  \x32\x35 -vc-codegen        <- malformed prefix (\x32\x35 = ASCII "25")
+2026.1:   -vc-codegen -disable-finalizer-msg
+```
+
+The 2025.3 `libsycl.so.8` serialized a stray option token in front of
+`-vc-codegen`, which IGC 2.28.4's strict parser rejects with `invalid api
+option`. 2026.1 emits a clean string. **Fix: upgrade torch to 2.13.0+xpu**
+(which links `libsycl.so.9`, oneAPI 2026.0 — verified from the wheel's
+`libtorch_xpu.so` NEEDED entries and METADATA deps `intel-sycl-rt==2026.0.0`)
+and build `xpu-ltx-kernels` with the oneAPI 2026.1 compiler. ESIMD then runs
+end-to-end in the torch process (`na3d_esimd` op). AOT (`spir64_gen --device
+bmg`) still fails (`gen compiler command failed`, exit 226) on both 2025.3 and
+2026.1, but JIT (`spir64`) works — fine for a per-process extension.
+
+Perf caveat: unlocking ESIMD does **not** by itself beat eager. At the decoder's
+wide kernels, per-query ESIMD flash (0.1-0.2x) and plain SYCL (0.1-1.0x) are
+still slower than eager's dense batched SDPA (a GEMM at ~11-18 TFLOP/s). A real
+win needs a batched-GEMM-shaped DPAS kernel; a raw DPAS throughput probe was
+launch-bound and inconclusive, and the effort was not pursued. NA stays opt-in.
 
 ## 4. Kernel implementation
 
@@ -196,24 +242,26 @@ Experiments that did **not** win and were reverted:
   extrapolate.
 - **Real decoder kernels (from VAE config `stage_kernels =
   [[3,7,7],[3,7,7],[3,5,5],[3,5,5],[11,11,11]]`):** eager's dense batched SDPA
-  (one masked GEMM per window-geometry group) beats the per-query flash kernel:
+  (one masked GEMM per window-geometry group) beats the per-query flash kernels.
+  Measured on torch 2.13.0+xpu:
 
-  | shape              | kernel      | sycl / eager |
-  |--------------------|-------------|--------------|
-  | (1,9,16,16,32,64)  | (3,7,7)     | 0.4x         |
-  | (1,9,16,16,32,64)  | (3,5,5)     | 1.0x         |
-  | (1,9,32,32,32,64)  | (3,7,7)     | 0.9x         |
-  | (1,9,16,32,32,64)  | (3,7,7)     | 1.2x         |
-  | (1,11,32,32,32,64) | (11,11,11)  | 0.2x         |
+  | shape              | kernel      | sycl / eager | esimd / eager |
+  |--------------------|-------------|--------------|---------------|
+  | (1,9,16,16,32,64)  | (3,7,7)     | 0.5x         | 0.1x          |
+  | (1,9,16,16,32,64)  | (3,5,5)     | 1.0x         | 0.2x          |
+  | (1,9,32,32,32,64)  | (3,7,7)     | 0.7x         | 0.2x          |
+  | (1,9,16,32,32,64)  | (3,7,7)     | 1.0x         | 0.2x          |
+  | (1,11,16,16,32,64) | (11,11,11)  | 0.1x         | 0.02x         |
 
-- **End-to-end (512×512/49f, distilled, `--offload cpu`, decode stage timed):**
-  eager **6.4s** vs SYCL **17.9s** (~2.8x slower). Note: the pipeline needs
-  `@torch.inference_mode()` (as the real CLI `main()` has) or the text-encoder
-  cache isn't freed and the DiffVAE tiling check fails with `usable_bytes=0`.
-- **Conclusion:** the SYCL kernel is a correctness-parity port, not a speedup,
-  for the shipped decoder. A real win needs XMX/DPAS (blocked) or a
-  batched-GEMM-shaped kernel. Kept **opt-in** via `LTX_XPU_NA_KERNELS=1`; eager
-  remains the XPU default.
+- **End-to-end (512×512/49f, distilled, `--offload cpu`, decode stage timed, on
+  torch 2.13.0+xpu):** eager **7.0s** vs SYCL **17.3s** (~2.5x slower). Note:
+  the pipeline needs `@torch.inference_mode()` (as the real CLI `main()` has)
+  or the text-encoder cache isn't freed and the DiffVAE tiling check fails with
+  `usable_bytes=0`.
+- **Conclusion:** the SYCL and ESIMD kernels are correctness-parity ports, not
+  speedups, for the shipped decoder. A real win needs a batched-GEMM-shaped
+  DPAS kernel. Kept **opt-in** via `LTX_XPU_NA_KERNELS=1`; eager remains the XPU
+  default.
 - `uv run ruff check` clean on all changed files.
 
 ## 7. End-to-end run status
