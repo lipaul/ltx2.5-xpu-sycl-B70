@@ -20,8 +20,9 @@ logger = logging.getLogger(__name__)
 _NO_NATTEN_WARNING = (
     "================================================================================\n"
     "DiffVAE: natten is NOT installed. Falling back to a slower neighborhood-attention\n"
-    "backend (Triton if available, else pure-PyTorch tiled SDPA). This path is for\n"
-    "compatibility only — install natten for production DiffVAE decode:\n"
+    "backend (xpu_ltx_kernels on XPU, Triton on CUDA, else pure-PyTorch tiled SDPA).\n"
+    "This path is for compatibility only — install natten for production DiffVAE\n"
+    "decode:\n"
     "  uv sync --package ltx-core --extra natten\n"
     "================================================================================"
 )
@@ -128,6 +129,37 @@ class TritonNaAttention:
         return na_attention_triton(q, k, v, list(attn.kernel_size))
 
 
+class XpuNaAttention:
+    """SYCL NA via xpu_ltx_kernels (Intel XPU hosts with the library built).
+
+    Falls back to eager SDPA when the native library is missing or the op
+    rejects the shapes (e.g. a head_dim other than 32/64).
+    """
+
+    def __call__(
+        self,
+        attn: NeighborhoodAttention3D,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> torch.Tensor:
+        from xpu_ltx_kernels import na3d as xpu_na3d  # noqa: PLC0415
+
+        return xpu_na3d(q, k, v, list(attn.kernel_size))
+
+
+def xpu_na_available() -> bool:
+    """True when the xpu_ltx_kernels SYCL NA library is loadable and usable."""
+    if not torch.xpu.is_available():
+        return False
+    try:
+        from xpu_ltx_kernels import available as xpu_kernels_available  # noqa: PLC0415
+
+        return xpu_kernels_available()
+    except ImportError:
+        return False
+
+
 def warn_no_natten(*, backend: str) -> None:
     """Emit the loud no-natten banner and which fallback backend was chosen."""
     logger.warning(_NO_NATTEN_WARNING)
@@ -135,7 +167,14 @@ def warn_no_natten(*, backend: str) -> None:
 
 
 def fallback_na_attention() -> NAAttentionCallable:
-    """Pick Triton if usable, else eager; emit the no-natten warning."""
+    """Pick the best available fallback: XPU SYCL, else Triton, else eager.
+
+    Selection order::
+        natten → (loud warning) xpu_ltx_kernels (XPU) → Triton (CUDA) → eager
+    """
+    if xpu_na_available():
+        warn_no_natten(backend="xpu_ltx_kernels SYCL na3d")
+        return XpuNaAttention()
     if triton_na_available():
         warn_no_natten(backend="Triton na3d")
         return TritonNaAttention()
@@ -146,9 +185,11 @@ def fallback_na_attention() -> NAAttentionCallable:
 __all__ = [
     "EagerSdpaAttention",
     "TritonNaAttention",
+    "XpuNaAttention",
     "fallback_na_attention",
     "na_attention_eager",
     "na_attention_triton",
     "triton_na_available",
     "warn_no_natten",
+    "xpu_na_available",
 ]

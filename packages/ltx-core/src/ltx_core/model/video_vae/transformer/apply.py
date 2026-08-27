@@ -35,8 +35,8 @@ from ltx_core.model.video_vae.transformer.config import (
 )
 from ltx_core.model.video_vae.transformer.dsl_kernels.block import DSLDiffusionNABlock
 from ltx_core.model.video_vae.transformer.fallback_na import (
-    EagerSdpaAttention,
     TritonNaAttention,
+    fallback_na_attention,
     triton_na_available,
     warn_no_natten,
 )
@@ -115,8 +115,9 @@ def _install_attention(decoder: DiffusionVideoDecoder, cfg: DiffVAEConfig) -> No
         _set_attention_function(decoder, TritonNaAttention())
         return
     if cfg.attention is NAttentionKind.EAGER_SDPA:
-        warn_no_natten(backend="eager tiled SDPA na3d")
-        _set_attention_function(decoder, EagerSdpaAttention())
+        # EAGER_SDPA means "natten is not available"; on XPU prefer the SYCL
+        # kernel (xpu_ltx_kernels), else Triton, else eager tiled SDPA.
+        _set_attention_function(decoder, fallback_na_attention())
         return
     if cfg.natten_backend is not None:
         configure_natten_backend(decoder, cfg.natten_backend)

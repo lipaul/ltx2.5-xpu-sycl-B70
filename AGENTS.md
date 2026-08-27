@@ -13,6 +13,10 @@ These already encode hard-won, repo-specific guidance. Read the relevant one bef
 - `packages/ltx-pipelines/CLAUDE.md` — inference pipelines: pipeline selection table, sigma schedules,
   LoRA conventions, `utils/blocks.py` memory model, DFR invariants, generated-keyframes rules.
 - `packages/ltx-kernels/README.md` and `packages/ltx-core/README.md` — CUDA extension layout and model components.
+- `packages/xpu-ltx-kernels/README.md` — fork-only XPU SYCL kernels: build prerequisites (oneAPI 2025.3), the
+  `na3d` DiffVAE kernel contract, and the ESIMD limitation.
+- For training/fine-tuning/LoRA requests, use the skill at `.claude/skills/train-model/SKILL.md` — it orchestrates
+  dataset probing, mode selection, preprocessing, launch, and monitoring (see also `packages/ltx-trainer/AGENTS.md`).
 
 Keep changes to each package consistent with its own instruction file.
 
@@ -22,6 +26,12 @@ Keep changes to each package consistent with its own instruction file.
 - `packages/ltx-pipelines/` — ready-made inference pipelines (`ltx_pipelines.*`, run as `python -m ltx_pipelines.<module>`).
 - `packages/ltx-trainer/` — LoRA / full fine-tuning (`scripts/train.py`, `configs/*.yaml`).
 - `packages/ltx-kernels/` — optional CUDA/C++ extensions (all2all, blockwise FP8/FP6 GEMM, NVFP4, CuTe DSL VAE kernels).
+- `packages/xpu-ltx-kernels/` — fork-only SYCL kernels for XPU (DiffVAE `na3d` neighborhood attention). Excluded from the uv workspace like `ltx-kernels`; built with CMake + the oneAPI **2025.3** compiler (see its README).
+
+The fork's inference entrypoint is `./run_pipeline.sh "PROMPT" out.mp4 [args...]` — a thin wrapper over
+`uv run python -m ltx_pipelines.distilled` with the split-layout model paths pre-wired (model root default
+`/home/acm/paul/models/ltx-2.5`, override via `LTX_MODEL_ROOT`; extra args are forwarded verbatim). It does **not**
+add `--offload cpu` for you.
 
 ## Toolchain (uv + torch XPU)
 
@@ -39,7 +49,13 @@ against the official PyTorch **XPU** index — no CUDA.
 - **`ltx-trainer` and `ltx-kernels` are excluded from the uv workspace** (`[tool.uv.workspace].exclude`). The
   trainer pins CUDA-only `torchcodec`; the kernels are CUDA extensions. A plain `uv sync` installs only
   `ltx-core` + `ltx-pipelines`, the pipeline stack.
-- Fresh clone is shallow; `git fetch --unshallow origin` before pushing a branch that depends on full history.
+- **The `natten` extra is gone** (the README Quick Start still runs `uv sync --extra natten`) — it was dropped
+  when the CUDA-only `natten` package was removed; plain `uv sync` is the correct install command on this fork.
+- **SYCL toolchain must match torch-xpu's runtime.** torch 2.12.0+xpu links `libsycl.so.8` (oneAPI 2025.3). The
+  newer installed 2026.x compilers ship `libsycl.so.9`, whose device-image format is incompatible — a v9-built
+  extension crashes in `ProgramManager::addImage` at `torch.ops.load_library`. Use
+  `intel-oneapi-compiler-dpcpp-cpp-2025.3` (apt) for `xpu-ltx-kernels`; CMake auto-selects it. ESIMD device code
+  is additionally rejected by the current driver (`invalid api option`), so plain SYCL is the working path.
 
 ## Code quality gates
 
@@ -63,6 +79,10 @@ There is **no `.pre-commit-config.yaml`** in this tree — `pre-commit run` is n
 - Audio-video work needs an Intel GPU with XPU support; the pipeline selects the device in
   `packages/ltx-core/src/ltx_core/devices.py` (XPU is probed via `torch.xpu.is_available()`).
 - LTX 2.5 requires the LTX-fine-tuned Gemma 4 text encoder; Google's vanilla Gemma 4 is not a substitute.
+- **DiffVAE neighborhood attention runs the eager tiled-SDPA fallback by default on XPU** (natten is CUDA-only,
+  `triton_na_available()` is gated on `torch.cuda`). `packages/xpu-ltx-kernels` provides a SYCL `na3d` kernel
+  (2–8x vs eager for the raw op); `fallback_na_attention()` in `fallback_na/__init__.py` picks it when the
+  library is built and importable. It is an opt-in extra: `uv sync` does not build it.
 - **XPU allocator cache is never freed by the upstream memory helpers.** `cleanup_accelerator_memory` /
   `empty_device_cache` / `synchronize_device` in `devices.py` were CUDA/MPS-only, so the ~29 GB XPU
   caching-allocator cache from the text encoder stayed reserved and the DiffVAE tiling check reported

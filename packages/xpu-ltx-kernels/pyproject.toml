@@ -1,0 +1,21 @@
+[project]
+name = "xpu-ltx-kernels"
+version = "1.0.0"
+description = "SYCL/ESIMD kernels for ltx-core on Intel XPU (B70)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.12.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
