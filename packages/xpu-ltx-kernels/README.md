@@ -9,6 +9,9 @@ SYCL kernels for `ltx-core` on Intel XPU (B70). Currently ships:
 - **`na3d_esimd`** — same kernel written with Intel Explicit SIMD (ESIMD).
   Requires the oneAPI 2026.x toolchain / torch 2.13.0+xpu (libsycl.so.9); with
   the older 2025.3 pairing the ESIMD device code was driver-rejected.
+- **`na3d_dpas`** — batched-GEMM-shaped NA via ESIMD **DPAS** (XMX systolic),
+  with VNNI-packed operands. Correctness-parity vs eager; performance work is
+  ongoing (see Benchmark).
 
 This package is excluded from the uv workspace (like `ltx-kernels`). Build the
 native library with CMake, then install the Python wrapper.
@@ -80,6 +83,16 @@ flash kernel. Measured on torch 2.13 at decode-tile shapes:
 | (1,9,32,32,32,64)  | (3,7,7)     | 0.7x         | 0.2x          |
 | (1,9,16,32,32,64)  | (3,7,7)     | 1.0x         | 0.2x          |
 | (1,11,16,16,32,64) | (11,11,11)  | 0.1x         | 0.02x         |
+
+`na3d_dpas` (DPAS XMX, batched QK^T/PV with VNNI operands) is **correct**
+(full parity vs eager at `rtol/atol 2e-2` on all real kernels) but, in its
+current fine-grained grid, slower than eager (e.g. (3,7,7) 9×16×16: dpas 64ms
+vs eager 42ms) — too many small work-items, each recomputing the full halo
+QK^T for only 8 queries (halo 560 keys vs a 147-key window ≈ 4x wasted DPAS),
+and the per-query softmax on the critical path. Beating eager needs a
+persistent grid with M=64-style query tiles and the DPAS PV off the softmax
+critical path (as `na_attn_dsl`'s cooperative tiles do). Status: work in
+progress; eager stays the default.
 
 End-to-end (512×512/49f, distilled, `--offload cpu`): **eager decode 7.0s vs
 SYCL 17.3s** (~2.5x slower). So the per-query kernels are correctness-parity

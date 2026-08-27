@@ -20,16 +20,16 @@ def make_inputs(b, t, h, w, nh, hd, seed=0):
     return q, k, v
 
 
-def run_case(b, t, h, w, nh, hd, kt, kh, kw, seed=0):
+def run_case(b, t, h, w, nh, hd, kt, kh, kw, seed=0, op="na3d"):
     q, k, v = make_inputs(b, t, h, w, nh, hd, seed)
     qx, kx, vx = q.to("xpu"), k.to("xpu"), v.to("xpu")
     ref = eager_na3d(q, k, v, kernel_size=[kt, kh, kw], is_causal=None, scale=1.0)
-    got = torch.ops.xpu_ltx_kernels.na3d(qx, kx, vx, kt, kh, kw).cpu()
+    got = getattr(torch.ops.xpu_ltx_kernels, op)(qx, kx, vx, kt, kh, kw).cpu()
     torch.xpu.synchronize()
     diff = (got.float() - ref.float()).abs().max().item()
     rel = diff / (ref.float().abs().max().item() + 1e-6)
     ok = torch.allclose(got.float(), ref.float(), rtol=2e-2, atol=2e-2)
-    print(f"B{b} T{t} H{h} W{w} NH{nh} HD{hd} k=({kt},{kh},{kw}) seed{seed}: "
+    print(f"[{op}] B{b} T{t} H{h} W{w} NH{nh} HD{hd} k=({kt},{kh},{kw}) seed{seed}: "
           f"ok={ok} max_abs_diff={diff:.4f} rel={rel:.4f}")
     return ok
 
@@ -52,9 +52,17 @@ if __name__ == "__main__":
         # small dims (>= kernel, matching NeighborhoodAttention3D.forward guard)
         (1, 3, 3, 3, 4, 64, 3, 3, 3),
         (1, 5, 3, 4, 4, 64, 3, 3, 3),
+        # real decoder kernels (HD=64 only; na3d_dpas is HD-64-only)
+        (1, 9, 16, 16, 8, 64, 3, 7, 7),
+        (1, 9, 16, 16, 8, 64, 3, 5, 5),
+        (1, 11, 16, 16, 8, 64, 11, 11, 11),
+        (1, 9, 32, 16, 4, 64, 3, 7, 7),
     ]
     ok_all = True
     for case in cases:
-        ok_all &= run_case(*case)
+        ok_all &= run_case(*case, op="na3d")
+        _, t, h, w, _, hd, kt, kh, kw = case[:9]
+        if hd == 64 and t >= kt and h >= kh and w >= kw:  # na3d_dpas needs dims>=kernel + HD=64
+            ok_all &= run_case(*case, op="na3d_dpas")
     print("\nALL OK" if ok_all else "\nFAILURES")
     sys.exit(0 if ok_all else 1)

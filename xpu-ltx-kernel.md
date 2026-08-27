@@ -208,12 +208,33 @@ Template-specialized on `HD` ∈ {32, 64}. Registered via
 `sycl::queue` comes from `c10::xpu::getCurrentXPUStream()` (the torch-xpu stream
 IS a SYCL queue — converts via `operator sycl::queue&`).
 
+`csrc/na3d_dpas.cpp` — **batched-GEMM DPAS** version (XMX systolic). One
+work-item per `(b,t,h,nh,w-slice of 8 queries)`. For each 16-key chunk of the
+slice's halo: DPAS QK^T (M=8 × K=16 × N=16, accumulated over HD/16 K-slices),
+per-query window mask + online softmax, then DPAS PV (M=8 × 16 keys × HD in
+16-slices). **Key discovery — DPAS operand layout (see Phase-0 probes):**
+- B must be **VNNI-packed**: for bf16, each `uint32` = `{bf16[2k][n],
+  bf16[2k+1][n]}` (two K-rows vertically packed). Without this, general B
+  values produce garbage (identity-B tests pass by coincidence; randn inputs
+  expose it).
+- With VNNI-packed B, the dpas **result is row-major** `S[m][n]` — no
+  even/odd interleave (an initial wrong guess that cost debugging time).
+- `dpas<8, RepeatCount, float, float, bf16, bf16, bf16, bf16, M*N, BN, AN>(C,
+  B, A)` computes `C(M×N) += A(M×16) × B(16×N)`; RepeatCount ≤ 8, N ∈ {8,16}.
+
 Experiments that did **not** win and were reverted:
 
 - **W-blocked kernel** (WB=2/4 W positions per work-item to reuse shared K/V
   columns): register pressure from `WB × HD` fp32 accumulators spilled and
   regressed vs the per-query kernel on small tiles; the per-query kernel won.
-- **ESIMD** (see 3.2).
+- **ESIMD** (see 3.2 — resolved by the torch 2.13 upgrade, but per-query ESIMD
+  still loses to eager).
+- **na3d_dpas performance**: correct (full parity at `rtol/atol 2e-2`) but
+  slower than eager — too many small work-items recomputing the full halo QK^T
+  (560 keys) for only 8 queries (147-key window ≈ 4x wasted DPAS), per-query
+  softmax on the critical path. Beating eager needs a persistent grid with
+  M=64-style tiles and DPAS PV off the softmax path (like `na_attn_dsl`'s
+  cooperative tiles).
 
 ## 5. Packaging and integration
 
