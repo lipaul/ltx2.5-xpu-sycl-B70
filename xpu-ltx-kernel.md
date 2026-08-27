@@ -278,22 +278,29 @@ model on the 30 GB XPU). Decode-stage timing (wrapping `VideoDecoder.__call__`):
 
 ## 8. Git state
 
-- Commit `b316844` "Add xpu-ltx-kernels: SYCL na3d for DiffVAE on Intel XPU
-  (B70)" on `main` — changes: new package, `fallback_na/__init__.py`,
-  `apply.py`, `AGENTS.md`.
-- `origin` = `lipaul/ltx-2-xpu` (existing fork), `sycl-b70` =
-  `https://github.com/lipaul/ltx2.5-xpu-sycl-B70` (new target).
-- **Push blocked:** the provided PAT authenticates as `li--paul` (id 4507065),
-  which has only **pull** access to `lipaul/ltx2.5-xpu-sycl-B70` (`push: false`
-  per API). The target repo exists on the `lipaul` account (a different user).
-  To push: add `li--paul` as a collaborator with write role on that repo, or
-  supply a PAT for the `lipaul` account. The token was used in-memory only,
-  never written to disk or the repo.
+Commits on `main`, all pushed to `sycl-b70`:
+
+- `b316844` "Add xpu-ltx-kernels: SYCL na3d for DiffVAE on Intel XPU (B70)" —
+  new package, `fallback_na/__init__.py` + `apply.py` wiring, `AGENTS.md`.
+- `057fa14` "Add porting record: xpu-ltx-kernel.md" — this document.
+- `9df2044` "Make xpu-ltx-kernels NA opt-in; document honest e2e result" —
+  NA is opt-in (`LTX_XPU_NA_KERNELS=1`), e2e harnesses in `bench/`.
+- `cbb7c3c` "Upgrade to torch 2.13.0+xpu (libsycl.so.9); unlock ESIMD" —
+  torch/torchvision/triton-xpu bump, oneAPI 2026.1 toolchain, `na3d_esimd` op,
+  §3.6 (ESIMD root-cause: a oneAPI 2025.3 bug, fixed by the upgrade).
+
+Remotes: `origin` = `lipaul/ltx-2-xpu` (existing fork), `sycl-b70` =
+`https://github.com/lipaul/ltx2.5-xpu-sycl-B70` (target). Push is done with a
+PAT for the `lipaul` account (the repo owner); the first PAT provided belonged
+to `li--paul` which only had pull access — the `lipaul`-account token worked.
+Tokens were used in-memory only, never written to disk or the repo (verified no
+`ghp_`/`x-access-token` in git config).
 
 ## 9. Things that would change the approach
 
-- A newer oneAPI + driver than the installed Intel Graphics runtime may fix the
-  ESIMD `invalid api option` — revisit then (README notes it).
+- ESIMD is now unlocked (torch 2.13.0+xpu + oneAPI 2026.1). A **batched-GEMM
+  shaped DPAS kernel** for NA is the remaining path to beat eager's dense SDPA
+  at the wide decoder kernels; per-query flash (SYCL or ESIMD) cannot.
 - BMG FP8 XMX (`blockwise_cpp` scaled GEMM) remains the biggest untapped win if
   someone wants to attempt a full port; needs the fp8 DPAS path and a real
   benchmark vs oneDNN to justify the effort.
