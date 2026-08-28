@@ -12,6 +12,9 @@ SYCL kernels for `ltx-core` on Intel XPU (B70). Currently ships:
 - **`na3d_dpas`** — batched-GEMM-shaped NA via ESIMD **DPAS** (XMX systolic),
   with VNNI-packed operands. Correctness-parity vs eager; performance work is
   ongoing (see Benchmark).
+- **`na3d_dpas2`** — tuned `na3d_dpas`: window-union halo, hoisted per-chunk
+  key decode, MQ=8 online softmax. Correct everywhere; 0.9x eager on the
+  stage-1 (3,7,7) kernel at NH=8 (see Benchmark).
 
 This package is excluded from the uv workspace (like `ltx-kernels`). Build the
 native library with CMake, then install the Python wrapper.
@@ -83,6 +86,13 @@ flash kernel. Measured on torch 2.13 at decode-tile shapes:
 | (1,9,32,32,32,64)  | (3,7,7)     | 0.7x         | 0.2x          |
 | (1,9,16,32,32,64)  | (3,7,7)     | 1.0x         | 0.2x          |
 | (1,11,16,16,32,64) | (11,11,11)  | 0.1x         | 0.02x         |
+
+`na3d_dpas2` (window-union halo + hoisted key decode + online softmax, MQ=8)
+is a tuned variant: correct everywhere and **0.9x eager at the stage-1 real
+kernel (3,7,7) 9x16x16** (48ms vs eager 42ms, measured NH=8). It does not yet
+beat eager at NH=32 or on the small-window kernels (3,5,5)/(11,11,11), where
+eager's whole-volume batched SDPA is dramatically faster (per-query DPAS
+cannot match eager's batching because DPAS M<=8).
 
 `na3d_dpas` (DPAS XMX, batched QK^T/PV with VNNI operands) is **correct**
 (full parity vs eager at `rtol/atol 2e-2` on all real kernels) but, in its

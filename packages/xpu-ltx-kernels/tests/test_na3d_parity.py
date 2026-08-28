@@ -64,5 +64,6 @@ if __name__ == "__main__":
         _, t, h, w, _, hd, kt, kh, kw = case[:9]
         if hd == 64 and t >= kt and h >= kh and w >= kw:  # na3d_dpas needs dims>=kernel + HD=64
             ok_all &= run_case(*case, op="na3d_dpas")
+            ok_all &= run_case(*case, op="na3d_dpas2")
     print("\nALL OK" if ok_all else "\nFAILURES")
     sys.exit(0 if ok_all else 1)

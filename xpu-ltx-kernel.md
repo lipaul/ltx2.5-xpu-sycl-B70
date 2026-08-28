@@ -236,6 +236,33 @@ Experiments that did **not** win and were reverted:
   M=64-style tiles and DPAS PV off the softmax path (like `na_attn_dsl`'s
   cooperative tiles).
 
+`csrc/na3d_dpas2.cpp` — **tuned DPAS kernel** (the incremental wins):
+- **window-union halo**: the kt/kh/kw halo expansion is unnecessary; the
+  kernel only touches the union of the tile's query windows (`w_hi` =
+  `window_bounds(w0+MQ-1).end-1`, no `+rw`). This alone cuts the (3,7,7)
+  per-tile key volume ~2x.
+- **hoisted key decode**: the div/mod chain `kidx/(nkh*nkw)`, `(kidx/nkw)%nkh`,
+  `kidx%nkw` was recomputed per (query,key) in both the max-pass and the
+  exp-pass. Computing `(kt,kh,kw)` once per 16-key chunk into a register
+  array and reusing it across all 8 queries was the single biggest win
+  (48ms vs 64ms on (3,7,7) 9x16x16, NH=8).
+- **MQ=8 (not 16)**: MQ=16 doubled the live register state (Qreg+Oacc 16×64 +
+  per-chunk S 16×16) and spilled; MQ=8 stayed fast. SUB-tiling (2×8 sub-tiles
+  sharing one halo load) also regressed — the extra live S/P state cost more
+  than the saved loads.
+- Result: **0.9x eager** on the real stage-1 kernel (3,7,7) 9x16x16 NH=8
+  (48ms vs eager 42ms). Still loses at NH=32 (eager's whole-volume batched
+  SDPA: ~2ms) and on small-window kernels (3,5,5)/(11,11,11) — per-query
+  DPAS (M<=8) cannot match eager's batching there.
+
+A fixed Cauchy-Schwarz softmax bound (`bound = ||q||·k_bound`) was tried to
+make the PV a stateless GEMM (per the CuTe design), but a single global
+`k_bound = max||k||` is far looser than the true rowmax for general inputs
+and underflows `exp2` to zero → 0/0 NaN. The report's version is only valid
+because the DiffVAE's RMS-norm makes `k_bound = sqrt(HD)·max|k_norm_weight|`
+tight; plumb that weight through if it is ever needed. Online softmax is the
+robust choice.
+
 ## 5. Packaging and integration
 
 - `packages/xpu-ltx-kernels/` excluded from the uv workspace (like
