@@ -12,6 +12,7 @@ the library) or call :func:`load()` directly. See the package README.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import torch
@@ -72,6 +73,8 @@ def na3d(
     ``ltx_core...fallback_na.eager.na3d`` semantics.
     """
     load()
+    if os.environ.get("LTX_XPU_NA_DPAS2") == "1":
+        return torch.ops.xpu_ltx_kernels.na3d_dpas2(q, k, v, *kernel_size)
     return torch.ops.xpu_ltx_kernels.na3d(q, k, v, *kernel_size)
 
 
