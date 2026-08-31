@@ -263,6 +263,15 @@ because the DiffVAE's RMS-norm makes `k_bound = sqrt(HD)·max|k_norm_weight|`
 tight; plumb that weight through if it is ever needed. Online softmax is the
 robust choice.
 
+**Online-softmax rescale bug (found via e2e video being garbage):** the
+naive per-chunk rescale `alpha = exp(m_old - chunk_max)` with the *chunk-local*
+max overflows to `inf` when a later chunk's row max is *below* the running max
+(`exp(positive)` → inf → NaN in `l`/`Oacc`). The standard flash-attention
+form is `m_new = max(m_old, chunk_max)`, `alpha = exp(m_old - m_new) ≤ 1`,
+`P = exp(s - m_new)`. Both `na3d_dpas` and `na3d_dpas2` had this bug; it is
+data-dependent (random parity tests with ~monotonic rowmax passed; the real
+decode's wide (11,11,11) stage tripped it intermittently). Fixed in both.
+
 ## 5. Packaging and integration
 
 - `packages/xpu-ltx-kernels/` excluded from the uv workspace (like

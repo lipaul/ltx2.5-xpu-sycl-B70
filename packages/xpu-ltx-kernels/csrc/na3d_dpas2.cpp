@@ -146,6 +146,10 @@ void na3d_dpas2_slice(
         if (mnew == -INFINITY) continue;
         const int nw_lo = window_bounds(gw, W, kw).start;
         const int nw_hi = window_bounds(gw, W, kw).end - 1;
+        // standard online softmax: m_new = max(m_old, chunk_max) so that
+        // alpha = exp(m_old - m_new) <= 1 always (no exp overflow -> NaN).
+        const float m_new = m_[gst + m] > mnew ? m_[gst + m] : mnew;
+        const float alpha = exp(m_[gst + m] - m_new);
         float l_new = 0.0f;
 #pragma unroll
         for (int j = 0; j < NK; ++j) {
@@ -154,17 +158,16 @@ void na3d_dpas2_slice(
                                kh_[j] >= nh_lo && kh_[j] <= nh_hi &&
                                kw_[j] >= nw_lo && kw_[j] <= nw_hi);
           const float s = in_win ? S[m * NK + j] : -INFINITY;
-          const float p = esimd::exp2((s - mnew) * LOG2E);
+          const float p = esimd::exp2((s - m_new) * LOG2E);
           Prow[m][j] = p;
           l_new += p;
         }
-        const float alpha = exp(m_[gst + m] - mnew);
         l[gst + m] = l[gst + m] * alpha + l_new;
 #pragma unroll
         for (int hd = 0; hd < HD; ++hd) Oacc[(gst + m) * HD + hd] *= alpha;
 #pragma unroll
         for (int j = 0; j < NK; ++j) Pv[m * NK + j] = Prow[m][j];
-        m_[gst + m] = mnew;
+        m_[gst + m] = m_new;
       }
       simd<bf16, MQ * NK> Preg;
 #pragma unroll

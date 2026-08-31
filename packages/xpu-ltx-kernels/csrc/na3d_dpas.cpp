@@ -131,17 +131,20 @@ void na3d_dpas_slice(
 #pragma unroll
     for (int m = 0; m < MQ; ++m) {
       if (mv[m] == -INFINITY) continue;
+      // standard online softmax: m_new = max(m_old, chunk_max) keeps
+      // alpha = exp(m_old - m_new) <= 1 (no exp overflow -> NaN).
+      const float m_new = m_[m] > mv[m] ? m_[m] : mv[m];
+      const float alpha = exp(m_[m] - m_new);
       float l_new = 0.0f;
       float Prow[NK];
 #pragma unroll
       for (int j = 0; j < NK; ++j) {
         if (Pw[m * NK + j] == -INFINITY) { Prow[j] = 0.0f; continue; }
-        Prow[j] = exp(Pw[m * NK + j] - mv[m]);
+        Prow[j] = exp(Pw[m * NK + j] - m_new);
         l_new += Prow[j];
       }
-      const float alpha = exp(m_[m] - mv[m]);
       l[m] = l[m] * alpha + l_new;
-      m_[m] = mv[m];
+      m_[m] = m_new;
 #pragma unroll
       for (int hd = 0; hd < HD; ++hd) Oacc[m * HD + hd] *= alpha;
 #pragma unroll
